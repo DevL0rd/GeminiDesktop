@@ -1,0 +1,9 @@
+google-genai
+opencv-python
+pyaudio
+pillow
+mss
+keyboard
+python-dotenv
+pygame
+pycaw
