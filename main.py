@@ -13,9 +13,9 @@ import PIL.Image
 import mss
 from dotenv import load_dotenv
 import pygame  # Add pygame for sound playback
-from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume, ISimpleAudioVolume
 from ctypes import cast, POINTER
-from comtypes import CLSCTX_ALL
+from comtypes import CLSCTX_ALL  # Import CLSCTX_ALL from comtypes, not ctypes
 import speech_recognition as sr  # Add speech recognition for wake word
 
 from google import genai
@@ -38,16 +38,18 @@ class AI:
         self.on_sound = "on.mp3"
         self.off_sound = "off.mp3"
         try:
-            # Load sounds in advance
-            pygame.mixer.music.load(self.on_sound)  # Pre-load first sound
-            self.on_sound_loaded = True
-            # For the second sound, we need a Sound object
+            # Load both sounds as Sound objects
+            self.on_sound_obj = pygame.mixer.Sound(self.on_sound)
             self.off_sound_obj = pygame.mixer.Sound(self.off_sound)
             print("Sound files preloaded successfully")
         except Exception as e:
             print(f"Error preloading sound files: {e}")
-            self.on_sound_loaded = False
+            self.on_sound_obj = None
             self.off_sound_obj = None
+        
+        # Store original volumes of applications to restore later
+        self.original_app_volumes = {}
+        self.volume_reduction_percent = 70  # Reduce other apps by 70%
         
         self.FORMAT = pyaudio.paInt16
         self.CHANNELS = 1
@@ -196,6 +198,37 @@ It is a screen, not a screen shot.
             volume.SetMasterVolumeLevelScalar(volume_percent / 100.0, None)
         except Exception as e:
             print(f"Error adjusting mic volume: {e}")
+            
+    async def adjust_other_app_volumes(self, reduce=True):
+        """
+        Adjust the volume of other applications
+        
+        Args:
+            reduce (bool): If True, reduce volume, if False, restore original volume
+        """
+        try:
+            sessions = AudioUtilities.GetAllSessions()
+            current_process_id = os.getpid()
+            
+            for session in sessions:
+                if session.Process and session.Process.pid != current_process_id:
+                    volume = session._ctl.QueryInterface(ISimpleAudioVolume)
+                    app_name = session.Process.name() if session.Process else "Unknown"
+                    
+                    if reduce:
+                        # Store the original volume before reducing
+                        if app_name not in self.original_app_volumes:
+                            self.original_app_volumes[app_name] = volume.GetMasterVolume()
+                        
+                        # Reduce the volume by specified percentage
+                        reduced_volume = self.original_app_volumes[app_name] * (1 - self.volume_reduction_percent/100)
+                        volume.SetMasterVolume(reduced_volume, None)
+                    else:
+                        # Restore original volume if we have it stored
+                        if app_name in self.original_app_volumes:
+                            volume.SetMasterVolume(self.original_app_volumes[app_name], None)
+        except Exception as e:
+            print(f"Error adjusting application volumes: {e}")
 
     async def activity_monitor(self):
         """Continuously monitor user and AI activity to auto-deactivate after inactivity"""
@@ -275,6 +308,12 @@ It is a screen, not a screen shot.
     async def deactivate(self):
         """Deactivate the AI assistant"""
         self.ai_active = False
+        # Restore other app volumes when AI is deactivated
+        await self.adjust_other_app_volumes(reduce=False)
+        # If AI was speaking when deactivated, restore mic volume
+        if self.ai_speaking:
+            self.ai_speaking = False
+            await self.adjust_mic_volume(100)
         print("AI deactivated")
         try:
             if self.off_sound_obj:
@@ -290,10 +329,10 @@ It is a screen, not a screen shot.
         self.ai_speaking = False
         print("AI activated")
         try:
-            if self.on_sound_loaded:
-                await asyncio.to_thread(pygame.mixer.music.play)
-                # Reload for next use
-                await asyncio.to_thread(pygame.mixer.music.load, self.on_sound)
+            if self.on_sound_obj:
+                await asyncio.to_thread(self.on_sound_obj.play)
+            # Lower other app volumes immediately when AI is activated
+            await self.adjust_other_app_volumes(reduce=True)
         except Exception as e:
             print(f"Error playing sound: {e}")
 
@@ -317,31 +356,40 @@ It is a screen, not a screen shot.
         keyboard.add_hotkey('alt+q', toggle_ai)
         print("Press Alt+q to toggle AI assistant")
 
+    def _recognize_wake_word(self):
+        """Blocking function to recognize wake word - runs in a thread"""
+        try:
+            # Use the microphone as source
+            with sr.Microphone() as source:
+                audio = self.recognizer.listen(source, phrase_time_limit=3)
+                
+            try:
+                # Try to recognize speech using Google Speech Recognition
+                text = self.recognizer.recognize_google(audio).lower()
+                # Check if wake word is in the recognized speech
+                if self.wake_word in text:
+                    print(f"Wake word detected: {text}")
+                    return True
+            except sr.UnknownValueError:
+                # Speech was unintelligible
+                pass
+            except sr.RequestError as e:
+                print(f"Could not request results; {e}")
+        except Exception as e:
+            if "timeout" not in str(e).lower():
+                print(f"Error in wake word detection: {e}")
+        
+        return False
+
     async def listen_for_wake_word(self):
         """Listen continuously for the wake word when AI is not active"""
         while self.running:
             if not self.ai_active and self.wake_word_enabled:
-                try:
-                    # Use the microphone as source
-                    with sr.Microphone() as source:
-                        audio = self.recognizer.listen(source, phrase_time_limit=3)
-                        
-                    try:
-                        # Try to recognize speech using Google Speech Recognition
-                        text = self.recognizer.recognize_google(audio).lower()
-                        # Check if wake word is in the recognized speech
-                        if self.wake_word in text:
-                            print(f"Wake word detected: {text}")
-                            await self.activate()
-                    except sr.UnknownValueError:
-                        # Speech was unintelligible
-                        pass
-                    except sr.RequestError as e:
-                        print(f"Could not request results; {e}")
-                except Exception as e:
-                    if "timeout" not in str(e).lower():
-                        print(f"Error in wake word detection: {e}")
-                
+                # Run the blocking recognition in a separate thread
+                detected = await asyncio.to_thread(self._recognize_wake_word)
+                if detected:
+                    await self.activate()
+            
             await asyncio.sleep(0.1)
 
     async def run(self):
