@@ -117,7 +117,8 @@ Don't ask many questions, and don't make small talk. Just respond unless you abs
         
         self.video_mode = "screen"  # Always use screen mode
         self.audio_in_queue = None
-        self.out_queue = None
+        self.video_queue = None  # Renamed from out_queue
+        self.audio_queue = None  # New queue for audio data
         self.session = None
         self.running = True
         self.audio_stream = None
@@ -146,14 +147,24 @@ Don't ask many questions, and don't make small talk. Just respond unless you abs
         while self.running:
             frame = await asyncio.to_thread(self._get_screen)
             if frame:
-                await self.out_queue.put(frame)
+                if self.video_queue.full():  # Check if the queue is full
+                    await self.video_queue.get()  # Remove the oldest item
+                await self.video_queue.put(frame)  # Add the new frame
             await asyncio.sleep(1.0)
 
-    async def send_realtime(self):
+    async def send_video(self):
         while self.running:
-            if self.ai_active and not self.out_queue.empty():
-                msg = await self.out_queue.get()
+            if self.ai_active and not self.video_queue.empty():
+                msg = await self.video_queue.get()  # Send video data
                 await self.session.send(input=msg)
+            else:
+                await asyncio.sleep(0.1)
+
+    async def send_audio(self):
+        while self.running:
+            if self.ai_active and not self.audio_queue.empty():
+                audio_msg = await self.audio_queue.get()  # Send audio data
+                await self.session.send(input=audio_msg)
             else:
                 await asyncio.sleep(0.1)
 
@@ -178,7 +189,7 @@ Don't ask many questions, and don't make small talk. Just respond unless you abs
             try:
                 if self.ai_active:
                     data = await asyncio.to_thread(self.audio_stream.read, self.CHUNK_SIZE, **kwargs)
-                    await self.out_queue.put({"data": data, "mime_type": "audio/pcm"})
+                    await self.audio_queue.put({"data": data, "mime_type": "audio/pcm"})  # Updated to use audio_queue
                     audio_data = np.frombuffer(data, dtype=np.int16)
                     volume = np.linalg.norm(audio_data)
                     if volume > self.audio_threshold:
@@ -389,8 +400,8 @@ Don't ask many questions, and don't make small talk. Just respond unless you abs
                 detected = await asyncio.to_thread(self._recognize_wake_word)
                 if detected:
                     await self.activate()
-            
-            await asyncio.sleep(0.1)
+                continue  # Continue listening for the wake word
+            await asyncio.sleep(0.1)  # Sleep to avoid busy waiting
 
     async def run(self):
         # Set up the global hotkey
@@ -404,11 +415,13 @@ Don't ask many questions, and don't make small talk. Just respond unless you abs
                 ):
                     self.session = session
                     self.audio_in_queue = asyncio.Queue()
-                    self.out_queue = asyncio.Queue(maxsize=15) 
+                    self.video_queue = asyncio.Queue(maxsize=15)  # New video queue
+                    self.audio_queue = asyncio.Queue(maxsize=5)  # New audio queue
 
                     # Create all the necessary tasks
                     tg.create_task(self.toggle_handler())
-                    tg.create_task(self.send_realtime())
+                    tg.create_task(self.send_video())  # Run send_video task
+                    tg.create_task(self.send_audio())  # Run send_audio task
                     tg.create_task(self.listen_audio())
                     tg.create_task(self.get_screen())
                     tg.create_task(self.receive_audio())
