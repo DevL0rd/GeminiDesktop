@@ -101,6 +101,10 @@ Responding in all cases like a natural conversation is important.
 Be kind and caring and a good friend.
 The screen recording is always on so the user may not be talking about the screen, so unless the user is talking about the screen there is no need to mention it.
 It is a screen, not a screen shot.
+Use google search to ensure your answers are accurate and up to date.
+You can use code execution to run code and give the output to the user, or control windows in creative ways.
+A good example is if the user asks to open a website, you can use code execution to open the website in a new tab in the default browser.
+Don't ask many questions, or make small talk. just respond unless you need to ask a clarifying question.
 """)],
                 role="user"
             ),
@@ -140,14 +144,13 @@ It is a screen, not a screen shot.
     async def get_screen(self):
         while self.running:
             frame = await asyncio.to_thread(self._get_screen)
-            if frame is None:
-                continue
-            await self.out_queue.put(frame)
+            if frame:
+                await self.out_queue.put(frame)
             await asyncio.sleep(1.0)
 
     async def send_realtime(self):
         while self.running:
-            if self.ai_active and not self.out_queue.empty() and not self.ai_speaking:
+            if self.ai_active and not self.out_queue.empty():
                 msg = await self.out_queue.get()
                 await self.session.send(input=msg)
             else:
@@ -239,7 +242,7 @@ It is a screen, not a screen shot.
                     # Increment silence counter when neither AI nor user is speaking
                     self.deactivate_counter += 1
                     # If silence counter is high enough, deactivate
-                    threshold = 100
+                    threshold = 60
                     if self.deactivate_counter > threshold:
                         await self.deactivate()
 
@@ -263,7 +266,7 @@ It is a screen, not a screen shot.
                         # AI has started speaking
                         if not self.ai_speaking and (response.data or response.text):
                             self.ai_speaking = True
-                            await self.adjust_mic_volume(10)  # Lower mic volume when AI speaks
+                            await self.adjust_mic_volume(30)  # Lower mic volume when AI speaks
                             
                         if data := response.data:
                             self.audio_in_queue.put_nowait(data)
@@ -361,20 +364,17 @@ It is a screen, not a screen shot.
         try:
             # Use the microphone as source
             with sr.Microphone() as source:
+                # Adjust the recognizer sensitivity to ambient noise
+                self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                # Listen for the wake word
                 audio = self.recognizer.listen(source, phrase_time_limit=3)
-                
-            try:
-                # Try to recognize speech using Google Speech Recognition
-                text = self.recognizer.recognize_google(audio).lower()
-                # Check if wake word is in the recognized speech
-                if self.wake_word in text:
-                    print(f"Wake word detected: {text}")
-                    return True
-            except sr.UnknownValueError:
-                # Speech was unintelligible
-                pass
-            except sr.RequestError as e:
-                print(f"Could not request results; {e}")
+
+            # Try to recognize speech using Google Speech Recognition
+            text = self.recognizer.recognize_google(audio).lower()
+            # Check if wake word is in the recognized speech
+            if self.wake_word in text:
+                print(f"Wake word detected: {text}")
+                return True
         except Exception as e:
             if "timeout" not in str(e).lower():
                 print(f"Error in wake word detection: {e}")
