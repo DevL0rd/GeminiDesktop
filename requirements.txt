@@ -7,3 +7,4 @@ keyboard
 python-dotenv
 pygame
 pycaw
+SpeechRecognition

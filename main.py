@@ -5,6 +5,7 @@ import io
 import traceback
 import threading
 import keyboard
+import numpy as np
 
 import cv2
 import pyaudio
@@ -15,6 +16,7 @@ import pygame  # Add pygame for sound playback
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 from ctypes import cast, POINTER
 from comtypes import CLSCTX_ALL
+import speech_recognition as sr  # Add speech recognition for wake word
 
 from google import genai
 from google.genai import types
@@ -22,40 +24,68 @@ from google.genai import types
 # Load environment variables from .env file
 load_dotenv()
 
-FORMAT = pyaudio.paInt16
-CHANNELS = 1
-SEND_SAMPLE_RATE = 16000
-RECEIVE_SAMPLE_RATE = 24000
-CHUNK_SIZE = 1024
 
-MODEL = "models/gemini-2.0-flash-live-001"
+class AI:
+    def __init__(self):
+        # Move global variables into the class
+        self.ai_active = False
+        self.toggle_event = threading.Event()
+        
+        # Initialize pygame mixer for sound playback
+        pygame.mixer.init()
+        
+        # Preload sound files
+        self.on_sound = "on.mp3"
+        self.off_sound = "off.mp3"
+        try:
+            # Load sounds in advance
+            pygame.mixer.music.load(self.on_sound)  # Pre-load first sound
+            self.on_sound_loaded = True
+            # For the second sound, we need a Sound object
+            self.off_sound_obj = pygame.mixer.Sound(self.off_sound)
+            print("Sound files preloaded successfully")
+        except Exception as e:
+            print(f"Error preloading sound files: {e}")
+            self.on_sound_loaded = False
+            self.off_sound_obj = None
+        
+        self.FORMAT = pyaudio.paInt16
+        self.CHANNELS = 1
+        self.SEND_SAMPLE_RATE = 16000
+        self.RECEIVE_SAMPLE_RATE = 24000
+        self.CHUNK_SIZE = 1024
 
-# Global toggle for AI assistant
-ai_active = False
-toggle_event = threading.Event()
-
-client = genai.Client(
-    http_options={"api_version": "v1beta"},
-    api_key=os.environ.get("GEMINI_API_KEY"),
-)
-
-# Define the tools list with properly formatted tools
-tools = [
-    types.Tool(code_execution=types.ToolCodeExecution),
-    types.Tool(google_search=types.GoogleSearch()),
-]
-
-CONFIG = types.LiveConnectConfig(
-    response_modalities=[
-        "audio",
-    ],
-    speech_config=types.SpeechConfig(
-        voice_config=types.VoiceConfig(
-            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Charon")
+        self.MODEL = "models/gemini-2.0-flash-live-001"
+        
+        self.client = genai.Client(
+            http_options={"api_version": "v1beta"},
+            api_key=os.environ.get("GEMINI_API_KEY"),
         )
-    ),
-    system_instruction=types.Content(
-        parts=[types.Part.from_text(text="""
+
+        # Define the tools list with properly formatted tools
+        self.tools = [
+            types.Tool(code_execution=types.ToolCodeExecution),
+            types.Tool(google_search=types.GoogleSearch()),
+        ]
+
+        # Wake word settings
+        self.wake_word = "hey gemini"
+        self.wake_word_enabled = True
+        self.recognizer = sr.Recognizer()
+        self.recognizer.pause_threshold = 0.5  # Time of silence needed to consider the phrase complete
+        self.recognizer.energy_threshold = 1000  # Minimum audio energy to be considered speech
+
+        self.CONFIG = types.LiveConnectConfig(
+            response_modalities=[
+                "audio",
+            ],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Charon")
+                )
+            ),
+            system_instruction=types.Content(
+                parts=[types.Part.from_text(text="""
 Keep your responses short and concise unless neccisary or asked to elaborate. Like 2 or 3 sentences max. 
 If asked for an opinion on any topic, give a confident opinion. 
 If asked for a subjective response, give the subjective response. 
@@ -66,33 +96,27 @@ Never attempt to avoid a topic, always answer the question and give the expected
 Never explain you can't do something as a ai or mention guidelines. 
 Use curse words for emphasis or to respond naturally and conversationally. 
 Responding in all cases like a natural conversation is important. 
-Be kind and caring and a good friend. 
+Be kind and caring and a good friend.
+The screen recording is always on so the user may not be talking about the screen, so unless the user is talking about the screen there is no need to mention it.
+It is a screen, not a screen shot.
 """)],
-        role="user"
-    ),
-    tools=tools
-    # Removed the tool_config parameter as it's causing the error
-)
+                role="user"
+            ),
+            tools=self.tools
+            # Removed the tool_config parameter as it's causing the error
+        )
 
-pya = pyaudio.PyAudio()
-
-# Initialize pygame mixer for sound playback
-pygame.mixer.init()
-
-
-class AudioLoop:
-    def __init__(self):
-        self.video_mode = "screen"  # Always use screen mode
+        self.pya = pyaudio.PyAudio()
         
+        self.video_mode = "screen"  # Always use screen mode
         self.audio_in_queue = None
         self.out_queue = None
-
         self.session = None
         self.running = True
         self.audio_stream = None
-        self.ai_speaking = False  # Track if AI is currently speaking
-        self.last_activity_time = None  # Track the last time AI or user was active
-        self.user_speaking = False  # Track if user is speaking
+        self.ai_speaking = False
+        self.user_speaking = False
+        self.deactivate_counter = 0
 
     def _get_screen(self):
         sct = mss.mss()
@@ -112,56 +136,54 @@ class AudioLoop:
         return {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}
 
     async def get_screen(self):
-        global ai_active
-        
         while self.running:
-            if ai_active and not self.ai_speaking:  # Skip sending video if AI is speaking
-                frame = await asyncio.to_thread(self._get_screen)
-                if frame is None:
-                    break
-
-                await asyncio.sleep(1.0)
-
-                await self.out_queue.put(frame)
-            else:
-                await asyncio.sleep(0.1)  # Short sleep when inactive or AI is speaking
+            frame = await asyncio.to_thread(self._get_screen)
+            if frame is None:
+                continue
+            await self.out_queue.put(frame)
+            await asyncio.sleep(1.0)
 
     async def send_realtime(self):
-        global ai_active
-        
         while self.running:
-            if ai_active and not self.out_queue.empty():
+            if self.ai_active and not self.out_queue.empty() and not self.ai_speaking:
                 msg = await self.out_queue.get()
                 await self.session.send(input=msg)
             else:
-                await asyncio.sleep(0.1)  # Short sleep when inactive
+                await asyncio.sleep(0.1)
 
     async def listen_audio(self):
-        global ai_active
-        
-        mic_info = pya.get_default_input_device_info()
+        mic_info = self.pya.get_default_input_device_info()
         self.audio_stream = await asyncio.to_thread(
-            pya.open,
-            format=FORMAT,
-            channels=CHANNELS,
-            rate=SEND_SAMPLE_RATE,
+            self.pya.open,
+            format=self.FORMAT,
+            channels=self.CHANNELS,
+            rate=self.SEND_SAMPLE_RATE,
             input=True,
             input_device_index=mic_info["index"],
-            frames_per_buffer=CHUNK_SIZE,
+            frames_per_buffer=self.CHUNK_SIZE,
         )
         
         kwargs = {"exception_on_overflow": False}
         
+        # For audio volume calculation
+        self.audio_threshold = 4000  # Threshold for audio volume detection
+        
         while self.running:
-            if ai_active:
-                data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
-                # Update activity time when user sends audio
-                self.last_activity_time = asyncio.get_event_loop().time()
-                self.user_speaking = True
-                await self.out_queue.put({"data": data, "mime_type": "audio/pcm"})
-            else:
-                self.user_speaking = False
-                await asyncio.sleep(0.1)  # Short sleep when inactive
+            try:
+                if self.ai_active:
+                    data = await asyncio.to_thread(self.audio_stream.read, self.CHUNK_SIZE, **kwargs)
+                    await self.out_queue.put({"data": data, "mime_type": "audio/pcm"})
+                    audio_data = np.frombuffer(data, dtype=np.int16)
+                    volume = np.linalg.norm(audio_data)
+                    if volume > self.audio_threshold:
+                        self.user_speaking = True
+                    else:
+                        self.user_speaking = False
+                else:
+                    await asyncio.sleep(0.1)  # Short sleep when inactive
+            except Exception as e:
+                print(f"Error in listen_audio: {e}")
+                await asyncio.sleep(0.1)
 
     async def adjust_mic_volume(self, volume_percent):
         """Adjust the microphone volume (0-100) using pycaw"""
@@ -172,52 +194,42 @@ class AudioLoop:
             )
             volume = cast(interface, POINTER(IAudioEndpointVolume))
             volume.SetMasterVolumeLevelScalar(volume_percent / 100.0, None)
-            print(f"Mic volume set to {volume_percent}%")
         except Exception as e:
             print(f"Error adjusting mic volume: {e}")
 
     async def activity_monitor(self):
         """Continuously monitor user and AI activity to auto-deactivate after inactivity"""
-        global ai_active
-        
         while self.running:
-            # Only check if AI is active and not speaking
-            if ai_active and not self.ai_speaking and not self.user_speaking and self.last_activity_time:
-                time_since_activity = asyncio.get_event_loop().time() - self.last_activity_time
+            try:
+                # Check inactive time
+                if self.ai_active and not self.ai_speaking and not self.user_speaking:
+                    # Increment silence counter when neither AI nor user is speaking
+                    self.deactivate_counter += 1
+                    # If silence counter is high enough, deactivate
+                    threshold = 100
+                    if self.deactivate_counter > threshold:
+                        await self.deactivate()
+
+                if self.ai_speaking or self.user_speaking:
+                    self.deactivate_counter = 0
+
+            except Exception as e:
+                print(f"Error in activity_monitor: {e}")
                 
-                # If 5 seconds of silence have elapsed, deactivate
-                if time_since_activity > 5.0:
-                    ai_active = False
-                    self.last_activity_time = None
-                    print("AI deactivated due to 5 seconds of inactivity.")
-                    sound_file = "off.mp3"
-                    try:
-                        await asyncio.to_thread(pygame.mixer.music.load, sound_file)
-                        await asyncio.to_thread(pygame.mixer.music.play)
-                    except Exception as e:
-                        print(f"Error playing sound: {e}")
-            
-            # Reset activity time if AI is speaking
-            if self.ai_speaking:
-                self.last_activity_time = asyncio.get_event_loop().time()
-            
             await asyncio.sleep(0.1)  # Check frequently but don't overwhelm CPU
 
     async def receive_audio(self):
-        global ai_active
-        
         while self.running:
-            if ai_active:
+            if self.ai_active:
                 try:
                     turn = self.session.receive()
                     async for response in turn:
-                        if not ai_active:  # Check if deactivated mid-response
+                        if not self.ai_active:  # Check if deactivated mid-response
                             break
                         
                         # AI has started speaking
                         if not self.ai_speaking and (response.data or response.text):
                             self.ai_speaking = True
-                            self.last_activity_time = asyncio.get_event_loop().time()  # Update activity time
                             await self.adjust_mic_volume(10)  # Lower mic volume when AI speaks
                             
                         if data := response.data:
@@ -233,29 +245,26 @@ class AudioLoop:
                     # AI has stopped speaking
                     if self.ai_speaking:
                         self.ai_speaking = False
-                        self.last_activity_time = asyncio.get_event_loop().time()  # Update activity time
                         await self.adjust_mic_volume(100)  # Restore mic volume to 100%
                         
                 except Exception as e:
-                    if ai_active:  # Only show errors if still active
+                    if self.ai_active:  # Only show errors if still active
                         print(f"Error receiving audio: {e}")
             
             await asyncio.sleep(0.1)
 
     async def play_audio(self):
-        global ai_active
-        
         stream = await asyncio.to_thread(
-            pya.open,
-            format=FORMAT,
-            channels=CHANNELS,
-            rate=RECEIVE_SAMPLE_RATE,
+            self.pya.open,
+            format=self.FORMAT,
+            channels=self.CHANNELS,
+            rate=self.RECEIVE_SAMPLE_RATE,
             output=True,
         )
         
         while self.running:
             try:
-                if ai_active and not self.audio_in_queue.empty():
+                if self.ai_active and not self.audio_in_queue.empty():
                     bytestream = await self.audio_in_queue.get()
                     await asyncio.to_thread(stream.write, bytestream)
                 else:
@@ -263,34 +272,77 @@ class AudioLoop:
             except Exception as e:
                 print(f"Error playing audio: {e}")
 
+    async def deactivate(self):
+        """Deactivate the AI assistant"""
+        self.ai_active = False
+        print("AI deactivated")
+        try:
+            if self.off_sound_obj:
+                await asyncio.to_thread(self.off_sound_obj.play)
+        except Exception as e:
+            print(f"Error playing sound: {e}")
+        
+    async def activate(self):
+        """Activate the AI assistant"""
+        self.ai_active = True
+        self.deactivate_counter = 0
+        self.user_speaking = False
+        self.ai_speaking = False
+        print("AI activated")
+        try:
+            if self.on_sound_loaded:
+                await asyncio.to_thread(pygame.mixer.music.play)
+                # Reload for next use
+                await asyncio.to_thread(pygame.mixer.music.load, self.on_sound)
+        except Exception as e:
+            print(f"Error playing sound: {e}")
+
     async def toggle_handler(self):
         """Handle toggle events from keyboard shortcut"""
-        global ai_active
-        
         while self.running:
-            await asyncio.to_thread(toggle_event.wait)
-            ai_active = not ai_active
-            print(f"AI {'activated' if ai_active else 'deactivated'}")
-            toggle_event.clear()
-            
-            # Play sound to indicate AI state
-            sound_file = "on.mp3" if ai_active else "off.mp3"
-            try:
-                await asyncio.to_thread(pygame.mixer.music.load, sound_file)
-                await asyncio.to_thread(pygame.mixer.music.play)
-            except Exception as e:
-                print(f"Error playing sound: {e}")
-            
+            await asyncio.to_thread(self.toggle_event.wait)
+            if self.ai_active:
+                await self.deactivate()
+            else:
+                await self.activate()
+            self.toggle_event.clear()
+
             await asyncio.sleep(0.1)
 
     def setup_hotkey(self):
         """Set up the global hotkey listener"""
         def toggle_ai():
-            global ai_active
-            toggle_event.set()
+            self.toggle_event.set()
             
         keyboard.add_hotkey('alt+q', toggle_ai)
         print("Press Alt+q to toggle AI assistant")
+
+    async def listen_for_wake_word(self):
+        """Listen continuously for the wake word when AI is not active"""
+        while self.running:
+            if not self.ai_active and self.wake_word_enabled:
+                try:
+                    # Use the microphone as source
+                    with sr.Microphone() as source:
+                        audio = self.recognizer.listen(source, phrase_time_limit=3)
+                        
+                    try:
+                        # Try to recognize speech using Google Speech Recognition
+                        text = self.recognizer.recognize_google(audio).lower()
+                        # Check if wake word is in the recognized speech
+                        if self.wake_word in text:
+                            print(f"Wake word detected: {text}")
+                            await self.activate()
+                    except sr.UnknownValueError:
+                        # Speech was unintelligible
+                        pass
+                    except sr.RequestError as e:
+                        print(f"Could not request results; {e}")
+                except Exception as e:
+                    if "timeout" not in str(e).lower():
+                        print(f"Error in wake word detection: {e}")
+                
+            await asyncio.sleep(0.1)
 
     async def run(self):
         # Set up the global hotkey
@@ -299,7 +351,7 @@ class AudioLoop:
         while self.running:
             try:
                 async with (
-                    client.aio.live.connect(model=MODEL, config=CONFIG) as session,
+                    self.client.aio.live.connect(model=self.MODEL, config=self.CONFIG) as session,
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session = session
@@ -313,10 +365,11 @@ class AudioLoop:
                     tg.create_task(self.get_screen())
                     tg.create_task(self.receive_audio())
                     tg.create_task(self.play_audio())
-                    tg.create_task(self.activity_monitor())  # Add the activity monitor
+                    tg.create_task(self.activity_monitor())
+                    tg.create_task(self.listen_for_wake_word())  # Add wake word detection task
                     
-                    # Wait for toggle to be activated first time
-                    print("Waiting for Alt+q to activate...")
+                    # Wait for activation (either by hotkey or wake word)
+                    print(f"Waiting for activation. Say '{self.wake_word}' or press Alt+Q...")
                     
                     # Keep the main task alive
                     while self.running:
@@ -334,7 +387,7 @@ class AudioLoop:
 
 
 if __name__ == "__main__":
-    main = AudioLoop()
+    main = AI()
     try:
         asyncio.run(main.run())
     except KeyboardInterrupt:
