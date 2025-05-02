@@ -304,91 +304,91 @@ class AI:
                     if detected:
                         await self.activate()
                 await asyncio.sleep(0.1)
-            except asyncio.CancelledError:
-                print("Listen for wake word task cancelled.")
-                break
             except Exception as e:
                 if self.running:
                     print(f"Error in listen_for_wake_word: {e}")
                 await asyncio.sleep(0.1)
 
+    async def cleanup(self):
+        print(f"Cancelling {len(self.tasks)} tasks...")
+        cancelled_count = 0
+        for task in self.tasks:
+            if not task.done():
+                task.cancel()
+                cancelled_count += 1
+        print(f"{cancelled_count} tasks signalled for cancellation.")
+
+        if self.tasks:
+            try:
+                print("Waiting for tasks to finish cancelling...")
+                await asyncio.wait_for(asyncio.gather(*self.tasks, return_exceptions=True), timeout=2.0)
+                print("Tasks cancellation processed.")
+            except asyncio.TimeoutError:
+                print("Timeout waiting for tasks to cancel. Some tasks may not have exited cleanly.")
+
+        print("Unhooking keyboard...")
+        try:
+            await asyncio.to_thread(keyboard.unhook_all)
+            print("Keyboard listener unhooked.")
+        except Exception as e:
+            print(f"Error unhooking keyboard: {e}")
+
+        print("Terminating PyAudio...")
+        if self.pya:
+            try:
+                await asyncio.to_thread(self.pya.terminate)
+                print("PyAudio terminated.")
+            except Exception as e:
+                print(f"Error terminating PyAudio: {e}")
+
+        print("Quitting Pygame Mixer...")
+        try:
+            await asyncio.to_thread(pygame.mixer.quit)
+            print("Pygame Mixer quit.")
+        except Exception as e:
+            print(f"Error quitting Pygame Mixer: {e}")
+
+        print("Cleanup complete.")
+        self.tasks = []
+
+        
     async def run(self):
         self.tasks = []
-        await asyncio.to_thread(self.setup_hotkey)
-        try:
-            async with (
-                self.client.aio.live.connect(model=self.MODEL, config=self.CONFIG) as session,
-                asyncio.TaskGroup() as tg,
-            ):
-                self.session = session
-                self.audio_in_queue = asyncio.Queue()
-                self.video_queue = asyncio.Queue(maxsize=15)
-                self.audio_queue = asyncio.Queue(maxsize=5)
-
-                self.tasks.append(tg.create_task(self.toggle_handler()))
-                self.tasks.append(tg.create_task(self.send_video()))
-                self.tasks.append(tg.create_task(self.send_audio()))
-                self.tasks.append(tg.create_task(self.listen_audio()))
-                self.tasks.append(tg.create_task(self.get_screen()))
-                self.tasks.append(tg.create_task(self.receive_audio()))
-                self.tasks.append(tg.create_task(self.play_audio()))
-                self.tasks.append(tg.create_task(self.activity_monitor()))
-                self.tasks.append(tg.create_task(self.listen_for_wake_word()))
-
-        except asyncio.CancelledError:
-            print("Main run task cancelled (likely during shutdown).")
-        except Exception as e:
-            print(f"Error in main run loop: {e}")
-        finally:
-            print("Initiating shutdown sequence...")
-            self.running = False
-
-            print(f"Cancelling {len(self.tasks)} tasks...")
-            cancelled_count = 0
-            for task in self.tasks:
-                if not task.done():
-                    task.cancel()
-                    cancelled_count += 1
-            print(f"{cancelled_count} tasks signalled for cancellation.")
-
-            if self.tasks:
-                try:
-                    print("Waiting for tasks to finish cancelling...")
-                    await asyncio.wait_for(asyncio.gather(*self.tasks, return_exceptions=True), timeout=2.0)
-                    print("Tasks cancellation processed.")
-                except asyncio.TimeoutError:
-                    print("Timeout waiting for tasks to cancel. Some tasks may not have exited cleanly.")
-                except asyncio.CancelledError:
-                    print("Task gathering cancelled.")
-
-            print("Unhooking keyboard...")
+        while self.running:
+            await asyncio.to_thread(self.setup_hotkey)
             try:
-                await asyncio.to_thread(keyboard.unhook_all)
-                print("Keyboard listener unhooked.")
+                async with (
+                    self.client.aio.live.connect(model=self.MODEL, config=self.CONFIG) as session,
+                    asyncio.TaskGroup() as tg,
+                ):
+                    self.session = session
+                    self.audio_in_queue = asyncio.Queue()
+                    self.video_queue = asyncio.Queue(maxsize=15)
+                    self.audio_queue = asyncio.Queue(maxsize=5)
+
+                    self.tasks.append(tg.create_task(self.toggle_handler()))
+                    self.tasks.append(tg.create_task(self.send_video()))
+                    self.tasks.append(tg.create_task(self.send_audio()))
+                    self.tasks.append(tg.create_task(self.listen_audio()))
+                    self.tasks.append(tg.create_task(self.get_screen()))
+                    self.tasks.append(tg.create_task(self.receive_audio()))
+                    self.tasks.append(tg.create_task(self.play_audio()))
+                    self.tasks.append(tg.create_task(self.activity_monitor()))
+                    self.tasks.append(tg.create_task(self.listen_for_wake_word()))
+
+            except asyncio.CancelledError:
+                print("Main run task cancelled (likely during shutdown).")
+                self.running = False
             except Exception as e:
-                print(f"Error unhooking keyboard: {e}")
+                print(f"Error in main run loop: {e}")
+            finally:
+                await self.cleanup()
+                await asyncio.sleep(1.0)
 
-            print("Terminating PyAudio...")
-            if self.pya:
-                try:
-                    await asyncio.to_thread(self.pya.terminate)
-                    print("PyAudio terminated.")
-                except Exception as e:
-                    print(f"Error terminating PyAudio: {e}")
 
-            print("Quitting Pygame Mixer...")
-            try:
-                await asyncio.to_thread(pygame.mixer.quit)
-                print("Pygame Mixer quit.")
-            except Exception as e:
-                print(f"Error quitting Pygame Mixer: {e}")
-
-            print("Cleanup complete.")
-            self.tasks = []
 
 
 if __name__ == "__main__":
     main = AI()
     asyncio.run(main.run())
-    main.running = False
     print("Program exited.")
