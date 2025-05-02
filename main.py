@@ -356,7 +356,7 @@ It is a screen, not a screen shot.
                 ):
                     self.session = session
                     self.audio_in_queue = asyncio.Queue()
-                    self.out_queue = asyncio.Queue(maxsize=5)
+                    self.out_queue = asyncio.Queue(maxsize=15) 
 
                     # Create all the necessary tasks
                     tg.create_task(self.toggle_handler())
