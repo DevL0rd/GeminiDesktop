@@ -240,27 +240,29 @@ Commands given to you like this *this is a command* are commands you should foll
         last_user_speaking_time = 0  # Track the last time the user was speaking
         while self.running:
             try:
-                current_time = asyncio.get_event_loop().time()
-                if self.ai_active and not self.ai_speaking and not self.user_speaking:
-                    self.deactivate_counter += 1
-                    if self.deactivate_counter > 60:
-                        await self.deactivate()
-                if self.ai_speaking or self.user_speaking:
-                    self.deactivate_counter = 0
+                if self.ai_active:
+                    current_time = asyncio.get_event_loop().time()
+                    if not self.ai_speaking and not self.user_speaking:
+                        self.deactivate_counter += 1
+                        if self.deactivate_counter > 60:
+                            await self.deactivate()
+                    if self.ai_speaking or self.user_speaking:
+                        self.deactivate_counter = 0
 
-                # Check if user changed from not speaking to speaking
-                if not user_speaking_old and self.user_speaking:
-                    if current_time - last_user_speaking_time > send_image_cooldown:
-                        frame = await safe_to_thread(self.get_screen_input)
-                        if frame:
-                            print("Sending image to AI...")
-                            await self.session.send(input=frame)
+                    # Check if user changed from not speaking to speaking
+                    if not user_speaking_old and self.user_speaking:
+                        print("User is speaking...")
+                        if current_time - last_user_speaking_time > send_image_cooldown:
+                            frame = await safe_to_thread(self.get_screen_input)
+                            if frame:
+                                print("Sending image to AI...")
+                                await self.session.send(input=frame)
 
-                # Update the last speaking time if the user is speaking
-                if self.user_speaking:
-                    last_user_speaking_time = current_time
+                    # Update the last speaking time if the user is speaking
+                    if self.user_speaking:
+                        last_user_speaking_time = current_time
 
-                user_speaking_old = self.user_speaking
+                    user_speaking_old = self.user_speaking
                 await asyncio.sleep(0.1)
             except Exception as e:
                 print(f"Error in activity_monitor: {e}")
@@ -508,7 +510,6 @@ Commands given to you like this *this is a command* are commands you should foll
             finally:
                 await self.cleanup()
                 await asyncio.sleep(1.0)
-
 
 
 
