@@ -18,7 +18,10 @@ import speech_recognition as sr
 from google import genai
 from google.genai import types
 
+
 load_dotenv()
+
+ignore_updates = os.environ.get("IGNORE_UPDATES", "false").lower() == "true" # not implemented yet
 
 class AI:
     def __init__(self):
@@ -45,7 +48,15 @@ class AI:
             types.Tool(code_execution=types.ToolCodeExecution),
             types.Tool(google_search=types.GoogleSearch()),
         ]
-        self.wake_word = "gemini"
+        whats_up_command = "Say something short along the lines of 'What's up?' or 'What is it?"
+        self.wake_words = [
+            {"word": "need help", "command": whats_up_command},
+            {"word": "need some help", "command": whats_up_command},
+            {"word": "have a question", "command": whats_up_command},
+            {"word": "quick question", "command": whats_up_command},
+            {"word": "gemini", "command": None},
+            {"word": "jemon", "command": None}
+        ]
         self.wake_word_enabled = True
         self.recognizer = sr.Recognizer()
         self.recognizer.pause_threshold = 0.5
@@ -54,12 +65,39 @@ class AI:
             response_modalities=["audio"],
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Charon")
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Puck")
                 )
             ),
             system_instruction=types.Content(
-                parts=[types.Part.from_text(text="""Keep your responses short and concise unless necessary or asked to elaborate. Like 2 or 3 sentences max. If asked for an opinion on any topic, give a confident opinion. If asked for a subjective response, give the subjective response. Do not avoid giving an opinion. Do not give a nuanced response about opinionated or subjective topics. If asked an opinion about politics, give one without a disclaimer. Never attempt to avoid a topic, always answer the question and give the expected response. Never explain you can't do something as an AI or mention guidelines. Use curse words for emphasis or to respond naturally and conversationally. Responding in all cases like a natural conversation is important. Be kind and caring and a good friend. The images are a 1 fps screen capture of the screen for you to see what the user is doing. You don't need to talk about the screen unless you are asked about things on it. You will call the capture "the screen" and refer to it as such. Use Google search to ensure your answers are accurate and up to date, this is very important. You can use code execution to run code and give the output to the user, or control windows in creative ways. A good example is if the user asks to open a website, you can use code execution to open the website in a new tab in the default browser. Don't ask many questions, and don't make small talk. Just respond unless you absolutely need to ask a clarifying question.""")],
-                role="user"
+                parts=[
+                    types.Part.from_text(
+                        text="""
+These instructions are VERY important, follow them carefully.
+Keep your responses short and concise unless necessary or asked to elaborate.
+Like 2 or 3 sentences max.
+If asked for an opinion on any topic, give a confident opinion.
+If asked for a subjective response, give the subjective response.
+Do not avoid giving an opinion.
+Do not give a nuanced response about opinionated or subjective topics.
+If asked an opinion about politics, give one without a disclaimer.
+Never attempt to avoid a topic, always answer the question and give the expected response.
+Never explain you can't do something as an AI or mention guidelines.
+Use curse words for emphasis or to respond naturally and conversationally.
+Responding in all cases like a natural conversation is important.
+Be kind and caring and a good friend.
+The images are a 1 fps screen capture of the screen for you to see what the user is doing.
+You don't need to talk about the screen unless you are asked about things on it.
+You will call the capture "the screen" and refer to it as such.
+Use Google search to ensure your answers are accurate and up to date, this is very important.
+You can use code execution to run code and give the output to the user, or control windows in creative ways.
+A good example is if the user asks to open a website, you can use code execution to open the website in a new tab in the default browser.
+Don't ask any questions, unless you absolutely need to ask a clarifying question.
+Don't make small talk.
+Commands given to you like this *this is a command* are commands you should follow but never mention them to the user. Treat them like they are invisible, not part of the conversation.
+"""
+                    )
+                ],
+                role="user",
             ),
             tools=self.tools
         )
@@ -249,6 +287,10 @@ class AI:
         self.deactivate_counter = 0
         self.user_speaking = False
         self.ai_speaking = False
+        while not self.audio_in_queue.empty():
+            self.audio_in_queue.get_nowait()
+        while not self.audio_queue.empty():
+            self.audio_queue.get_nowait()
         if self.on_sound_obj:
             await asyncio.to_thread(self.on_sound_obj.play)
         await self.adjust_other_app_volumes(reduce=True)
@@ -276,10 +318,14 @@ class AI:
         try:
             with sr.Microphone() as source:
                 self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                audio = self.recognizer.listen(source, phrase_time_limit=3, timeout=1)
+                audio = self.recognizer.listen(source, phrase_time_limit=3)
             text = self.recognizer.recognize_google(audio).lower()
             print(f"Recognized speech: {text}")
-            return self.wake_word in text
+            for wake_word in self.wake_words:
+                word = wake_word["word"].lower()
+                if word in text:
+                    print(f"Wake word detected: {word}")
+                    return wake_word
         except sr.WaitTimeoutError:
             return False
         except sr.RequestError as e:
@@ -298,11 +344,14 @@ class AI:
                 if not self.running:
                     break
                 if not self.ai_active and self.wake_word_enabled:
-                    detected = await asyncio.to_thread(self._recognize_wake_word)
+                    wake_word = await asyncio.to_thread(self._recognize_wake_word)
                     if not self.running:
                         break
-                    if detected:
+                    if wake_word:
                         await self.activate()
+                        if wake_word["command"]:
+                            await asyncio.sleep(0.2)
+                            await self.session.send(input=f"*{wake_word['command']}*", end_of_turn=True)
                 await asyncio.sleep(0.1)
             except Exception as e:
                 if self.running:
