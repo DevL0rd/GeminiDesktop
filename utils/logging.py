@@ -10,7 +10,7 @@ from utils.events import Events
 class Logger:
     Events = None
     prefix = "No prefix"
-    prefixColor = "purple"
+    prefixColor = None
     timeColor = "blue"
     useColor = True
     DEBUG = 0
@@ -75,36 +75,50 @@ class Logger:
             "[" + self.formatting['fg'][self.timeColor] + \
             timeString + self.formatting['fg']["white"] + "]"
 
-    def getColoredprefixString(self):
+    def getColoredprefixString(self, level):
+        color = self.prefixColor
+        if color is None:
+            color = self.getLevelColor(level)
+
         return self.formatting['fg']["white"] + \
-            "[" + self.formatting['fg'][self.prefixColor] + \
+            "[" + color + \
             self.prefix + self.formatting['fg']["white"] + "]"
+
+    def getLevelColor(self, level):
+        levelColor = self.formatting['fg']["white"]
+        if level == Logger.DEBUG:
+            levelColor = self.formatting['fg']["darkGray"]
+        elif level == Logger.INFO:
+            levelColor = self.formatting['fg']["green"]
+        elif level == Logger.WARN:
+            levelColor = self.formatting['fg']["yellow"]
+        elif level == Logger.ERROR:
+            levelColor = self.formatting['fg']["red"]
+        elif level == Logger.EXCEPTION:
+            levelColor = self.formatting['fg']["red"]
+
+        return levelColor
 
     def getColoredLevelString(self, level):
         levelString = "NONE"
-        levelColor = "white"
         if level == Logger.DEBUG:
             levelString = "DEBUG"
-            levelColor = "purple"
         elif level == Logger.INFO:
             levelString = "INFO"
-            levelColor = "green"
         elif level == Logger.WARN:
             levelString = "WARN"
-            levelColor = "yellow"
         elif level == Logger.ERROR:
             levelString = "ERROR"
-            levelColor = "red"
         elif level == Logger.EXCEPTION:
             levelString = "EXCEPTION"
-            levelColor = "red"
+        color = self.getLevelColor(level)
 
         # uhh makes sense sure
-        return self.formatting['fg']["white"] + "[" + self.formatting['fg'][levelColor] + levelString + self.formatting['fg']["white"] + "]"
+        return self.formatting['fg']["white"] + "[" + color + levelString + self.formatting['fg']["white"] + "]"
 
     def getColoredLogPrefixes(self, level):
         timeStringColored = self.getColoredTimeString()
-        prefixString = self.getColoredprefixString()
+        prefixString = self.getColoredprefixString(level)
         levelString = self.getColoredLevelString(level)
         return timeStringColored + "-" + levelString + "-" + prefixString + ": "
 
@@ -169,7 +183,7 @@ class Logger:
                 print(normalText)
                 Logger.trigger("print", normalText)
 
-    def debug(self, text, color="gray"):
+    def debug(self, text, color="darkGray"):
         colorText = self.formatAndColorLogText(text, color, Logger.DEBUG)
         normalText = self.formatLogText(text, Logger.DEBUG)
         if Logger.logging_level <= Logger.DEBUG:

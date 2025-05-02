@@ -35,7 +35,7 @@ async def safe_to_thread(func, *args, **kwargs):
 
 class AI:
     def __init__(self):
-        logger.info("Initializing AI class")
+        logger.debug("Initializing AI class")
         self.ai_active = False
         self.toggle_event = threading.Event()
         self.video_mode = False  # kinda wasteful
@@ -46,7 +46,7 @@ class AI:
         self.volume_reduction_blacklist = ["Discord.exe"]
         self.mic_reduction_percent = 90
         self.video_history_seconds = 5
-        self.speaking_threshold = 4000
+        self.speaking_threshold = 2000
 
         self.prompt = """
 These instructions are VERY important, follow them carefully.
@@ -70,6 +70,8 @@ You can use code execution to run code and give the output to the user, or contr
 A good example is if the user asks to open a website, you can use code execution to open the website in a new tab in the default browser.
 Don't ask any questions, unless you absolutely need to ask a clarifying question.
 Don't make small talk.
+Never ask if i need anything else or if i have any other questions or anything like that.
+Never say if you have any other questions, just ask or anthing like that.
 Commands given to you like this *this is a command* are commands you should follow but never mention them to the user. Treat them like they are invisible, not part of the conversation.
 """
 
@@ -146,30 +148,28 @@ Commands given to you like this *this is a command* are commands you should foll
             img.save(image_io, format="jpeg")
             image_io.seek(0)
             image_bytes = image_io.read()
-            logger.info("Screen input captured successfully")
+            logger.debug("Screen input captured successfully")
             return {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}
         except Exception as e:
             logger.error(f"Error capturing screen input: {e}")
             return None
 
     async def watch_screen(self):
-        logger.info("Starting screen watcher")
+        logger.debug("Starting screen watcher")
         while True:
-            if not self.video_mode:
-                await asyncio.sleep(1)
-                continue
-            try:
-                frame = await safe_to_thread(self.get_screen_input)
-                if frame:
-                    if self.video_queue.full():
-                        await self.video_queue.get()
-                    await self.video_queue.put(frame)
-                await asyncio.sleep(1.0)
-            except Exception as e:
-                logger.error(f"Error in watch_screen: {e}")
+            if self.video_mode:
+                try:
+                    frame = await safe_to_thread(self.get_screen_input)
+                    if frame:
+                        if self.video_queue.full():
+                            await self.video_queue.get()
+                        await self.video_queue.put(frame)
+                except Exception as e:
+                    logger.error(f"Error in watch_screen: {e}")
+            await asyncio.sleep(1.0)
 
     async def send_video(self):
-        logger.info("Starting video sender")
+        logger.debug("Starting video sender")
         while True:
             try:
                 if self.ai_active and not self.video_queue.empty():
@@ -182,7 +182,7 @@ Commands given to you like this *this is a command* are commands you should foll
                 logger.error(f"Error in send_video: {e}")
 
     async def send_all_video(self):
-        logger.info("Sending all video frames")
+        logger.debug("Sending all video frames")
         while not self.video_queue.empty():
             try:
                 msg = await self.video_queue.get()
@@ -192,7 +192,7 @@ Commands given to you like this *this is a command* are commands you should foll
                 logger.error(f"Error sending video frame: {e}")
 
     async def send_audio(self):
-        logger.info("Starting audio sender")
+        logger.debug("Starting audio sender")
         while True:
             try:
                 if self.ai_active and not self.audio_queue.empty():
@@ -204,17 +204,32 @@ Commands given to you like this *this is a command* are commands you should foll
                 logger.error(f"Error in send_audio: {e}")
 
     async def listen_audio(self):
-        logger.info("Starting audio listener")
+        logger.debug("Starting audio listener")
         kwargs = {"exception_on_overflow": False}
+        volume_history = []  # To store (timestamp, volume) pairs
+        frames_per_buffer = 1024
+
         while True:
             try:
                 if self.ai_active and self.audio_stream and self.audio_stream.is_active():
-                    data = await safe_to_thread(self.audio_stream.read, 1024, **kwargs)
+                    data = await safe_to_thread(self.audio_stream.read, frames_per_buffer, **kwargs)
                     await self.audio_queue.put({"data": data, "mime_type": "audio/pcm"})
                     audio_data = np.frombuffer(data, dtype=np.int16)
                     volume = np.linalg.norm(audio_data)
-                    self.user_speaking = volume > self.speaking_threshold
-                    self.mic_volume = volume
+                    current_time = asyncio.get_event_loop().time()
+
+                    volume_history.append((current_time, volume))
+
+                    cutoff_time = current_time - 1
+                    volume_history = [
+                        x for x in volume_history if x[0] >= cutoff_time]
+
+                    if volume_history:
+                        volumes = [v for _, v in volume_history]
+                        avg_volume = np.median(volumes)
+                        self.user_speaking = avg_volume > self.speaking_threshold
+
+                    self.mic_volume = avg_volume
                 else:
                     await asyncio.sleep(0.1)
             except Exception as e:
@@ -223,9 +238,10 @@ Commands given to you like this *this is a command* are commands you should foll
                     await self.activate_mic()
                 else:
                     logger.error(f"Error in listen_audio: {e}")
+                    await asyncio.sleep(0.1)
 
     async def adjust_mic_volume(self, reduce=True):
-        logger.info(f"Adjusting microphone volume, reduce: {reduce}")
+        logger.debug(f"Adjusting microphone volume, reduce: {reduce}")
         try:
             devices = AudioUtilities.GetMicrophone()
             interface = devices.Activate(
@@ -242,7 +258,7 @@ Commands given to you like this *this is a command* are commands you should foll
             logger.error(f"Error adjusting microphone volume: {e}")
 
     async def adjust_other_app_volumes(self, reduce=True):
-        logger.info(f"Adjusting other app volumes, reduce: {reduce}")
+        logger.debug(f"Adjusting other app volumes, reduce: {reduce}")
         try:
             sessions = AudioUtilities.GetAllSessions()
             current_process_id = os.getpid()
@@ -267,11 +283,17 @@ Commands given to you like this *this is a command* are commands you should foll
         except Exception as e:
             logger.error(f"Error adjusting other app volumes: {e}")
 
+    async def send_screenshot(self):
+        frame = await safe_to_thread(self.get_screen_input)
+        if frame:
+            await self.session.send(input=frame)
+            logger.info("Screenshot sent!")
+
     async def activity_monitor(self):
-        logger.info("Starting activity monitor")
+        logger.debug("Starting activity monitor")
         user_speaking_old = False
-        send_image_cooldown = 3
-        last_user_speaking_time = 0  # Track the last time the user was speaking
+        send_image_cooldown = 5
+        self.last_user_speaking_time = 0  # Track the last time the user was speaking
         while True:
             try:
                 if self.ai_active:
@@ -287,26 +309,22 @@ Commands given to you like this *this is a command* are commands you should foll
 
                     # Check if user changed from not speaking to speaking
                     if not user_speaking_old and self.user_speaking:
-                        logger.info("User started speaking")
-                        logger.debug(
+                        logger.info(
                             f"User speaking: {self.user_speaking}, Volume: {self.mic_volume}")
-                        if current_time - last_user_speaking_time > send_image_cooldown:
-                            frame = await safe_to_thread(self.get_screen_input)
-                            if frame:
-                                logger.info("Sending desktop to AI")
-                                await self.session.send(input=frame)
-
-                    # Update the last speaking time if the user is speaking
+                        if not self.video_mode:
+                            if current_time - self.last_user_speaking_time > send_image_cooldown:
+                                await self.send_screenshot()
+                                # Update the last speaking time if the user is speaking
                     if self.user_speaking:
-                        last_user_speaking_time = current_time
+                        self.last_user_speaking_time = current_time
 
                     user_speaking_old = self.user_speaking
-                await asyncio.sleep(0.1)
             except Exception as e:
                 logger.error(f"Error in activity_monitor: {e}")
+            await asyncio.sleep(0.1)
 
     async def receive_audio(self):
-        logger.info("Starting audio receiver")
+        logger.debug("Starting audio receiver")
         while True:
             try:
                 if self.ai_active:
@@ -327,12 +345,12 @@ Commands given to you like this *this is a command* are commands you should foll
                     if self.ai_speaking:
                         self.ai_speaking = False
                         await self.adjust_mic_volume(reduce=False)
-                await asyncio.sleep(0.1)
             except Exception as e:
                 logger.error(f"Error in receive_audio: {e}")
+            await asyncio.sleep(0.1)
 
     async def activate_speaker(self):
-        logger.info("Activating speaker")
+        logger.debug("Activating speaker")
         if self.audio_out_stream:
             await self.deactivate_speaker()
         self.audio_out_stream = await safe_to_thread(
@@ -345,7 +363,7 @@ Commands given to you like this *this is a command* are commands you should foll
         logger.debug("Speaker activated")
 
     async def deactivate_speaker(self):
-        logger.info("Deactivating speaker")
+        logger.debug("Deactivating speaker")
         if self.audio_out_stream:
             await safe_to_thread(self.audio_out_stream.stop_stream)
             await safe_to_thread(self.audio_out_stream.close)
@@ -353,7 +371,7 @@ Commands given to you like this *this is a command* are commands you should foll
         logger.debug("Speaker deactivated")
 
     async def play_audio(self):
-        logger.info("Starting audio playback")
+        logger.debug("Starting audio playback")
         while True:
             try:
                 if self.ai_active and self.audio_out_stream and not self.audio_in_queue.empty():
@@ -368,21 +386,22 @@ Commands given to you like this *this is a command* are commands you should foll
                     await self.activate_speaker()
                 else:
                     logger.error(f"Error in play_audio: {e}")
+                    await asyncio.sleep(0.1)
 
     async def empty_audio_queue(self):
-        logger.info("Emptying audio queue")
+        logger.debug("Emptying audio queue")
         while not self.audio_queue.empty():
             self.audio_queue.get_nowait()
         logger.debug("Audio queue emptied")
 
     async def empty_audio_in_queue(self):
-        logger.info("Emptying audio input queue")
+        logger.debug("Emptying audio input queue")
         while not self.audio_in_queue.empty():
             self.audio_in_queue.get_nowait()
         logger.debug("Audio input queue emptied")
 
     async def activate_mic(self):
-        logger.info("Activating microphone")
+        logger.debug("Activating microphone")
         if self.audio_stream:
             await self.deactivate_mic()
         self.default_mic_info = await safe_to_thread(self.pya.get_default_input_device_info)
@@ -398,7 +417,7 @@ Commands given to you like this *this is a command* are commands you should foll
         logger.debug("Microphone activated")
 
     async def deactivate_mic(self):
-        logger.info("Deactivating microphone")
+        logger.debug("Deactivating microphone")
         if self.audio_stream:
             await safe_to_thread(self.audio_stream.stop_stream)
             await safe_to_thread(self.audio_stream.close)
@@ -406,7 +425,7 @@ Commands given to you like this *this is a command* are commands you should foll
         logger.debug("Microphone deactivated")
 
     async def deactivate(self):
-        logger.info("Deactivating AI")
+        logger.debug("Deactivating AI")
         self.ai_active = False
         await self.adjust_other_app_volumes(reduce=False)
         await self.adjust_mic_volume(reduce=False)
@@ -414,10 +433,10 @@ Commands given to you like this *this is a command* are commands you should foll
         await self.deactivate_speaker()
         if self.off_sound_obj:
             await safe_to_thread(self.off_sound_obj.play)
-        logger.info("AI deactivated successfully")
+        logger.info("AI deactivated.")
 
     async def activate(self):
-        logger.info("Activating AI")
+        logger.debug("Activating AI")
         self.deactivate_counter = 0
         self.user_speaking = False
         self.ai_speaking = False
@@ -428,11 +447,14 @@ Commands given to you like this *this is a command* are commands you should foll
         await self.adjust_other_app_volumes(reduce=True)
         await self.activate_mic()
         await self.activate_speaker()
+        if not self.video_mode:
+            await self.send_screenshot()
+            self.last_user_speaking_time = asyncio.get_event_loop().time()
         self.ai_active = True
-        logger.info("AI activated successfully")
+        logger.info("AI activated!")
 
     async def toggle_handler(self):
-        logger.info("Starting toggle handler")
+        logger.debug("Starting toggle handler")
         while True:
             try:
                 await safe_to_thread(self.toggle_event.wait)
@@ -441,17 +463,16 @@ Commands given to you like this *this is a command* are commands you should foll
                 else:
                     await self.activate()
                 self.toggle_event.clear()
-                await asyncio.sleep(0.1)
             except Exception as e:
                 logger.error(f"Error in toggle_handler: {e}")
+            await asyncio.sleep(0.1)
 
     def setup_hotkey(self):
-        logger.info("Setting up hotkey")
+        logger.debug("Setting up hotkey")
 
         def toggle_ai():
             self.toggle_event.set()
         keyboard.add_hotkey('alt+q', toggle_ai)
-        logger.debug("Hotkey setup complete")
 
     def _recognize_wake_word(self):
         try:
@@ -476,7 +497,7 @@ Commands given to you like this *this is a command* are commands you should foll
             return False
 
     async def listen_for_wake_word(self):
-        logger.info("Starting wake word listener")
+        logger.debug("Starting wake word listener")
         while True:
             try:
                 if not self.ai_active and self.wake_word_enabled:
@@ -491,7 +512,7 @@ Commands given to you like this *this is a command* are commands you should foll
             await asyncio.sleep(0.1)
 
     async def cleanup(self):
-        logger.info("Starting cleanup process")
+        logger.debug("Starting cleanup process")
         logger.debug(f"Cancelling {len(self.tasks)} tasks...")
         cancelled_count = 0
         for task in self.tasks:
@@ -502,39 +523,39 @@ Commands given to you like this *this is a command* are commands you should foll
 
         if self.tasks:
             try:
-                logger.info("Waiting for tasks to finish cancelling...")
+                logger.debug("Waiting for tasks to finish cancelling...")
                 await asyncio.wait_for(asyncio.gather(*self.tasks, return_exceptions=True), timeout=2.0)
-                logger.info("Tasks cancellation processed.")
+                logger.debug("Tasks cancellation processed.")
             except asyncio.TimeoutError:
                 logger.warn(
                     "Timeout waiting for tasks to cancel. Some tasks may not have exited cleanly.")
 
-        logger.info("Unhooking keyboard...")
+        logger.debug("Unhooking keyboard...")
         try:
             keyboard.unhook_all()
-            logger.info("Keyboard listener unhooked.")
+            logger.debug("Keyboard listener unhooked.")
         except Exception as e:
             logger.error(f"Error unhooking keyboard: {e}")
 
-        logger.info("Terminating PyAudio...")
+        logger.debug("Terminating PyAudio...")
         if self.pya:
             try:
                 self.pya.terminate()
-                logger.info("PyAudio terminated.")
+                logger.debug("PyAudio terminated.")
             except Exception as e:
                 logger.error(f"Error terminating PyAudio: {e}")
 
-        logger.info("Quitting Pygame Mixer...")
+        logger.debug("Quitting Pygame Mixer...")
         try:
             pygame.mixer.quit()
-            logger.info("Pygame Mixer quit.")
+            logger.debug("Pygame Mixer quit.")
         except Exception as e:
             logger.error(f"Error quitting Pygame Mixer: {e}")
 
         self.tasks = []
 
     async def run(self):
-        logger.info("Starting AI run loop")
+        logger.info("Starting up...")
         self.tasks = []
         while True:
             try:
@@ -574,4 +595,4 @@ Commands given to you like this *this is a command* are commands you should foll
 if __name__ == "__main__":
     main = AI()
     asyncio.run(main.run())
-    logger.info("Program exited.")
+    logger.debug("Program exited.")
