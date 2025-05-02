@@ -21,57 +21,30 @@ from google.genai import types
 
 load_dotenv()
 
-ignore_updates = os.environ.get("IGNORE_UPDATES", "false").lower() == "true" # not implemented yet
+
+
+async def safe_to_thread(func, *args, **kwargs):
+    try:
+        return await asyncio.to_thread(func, *args, **kwargs)
+    except Exception as e:
+        print(f"Error in {func.__name__}: {e}")
+
 
 class AI:
     def __init__(self):
         self.ai_active = False
         self.toggle_event = threading.Event()
-        pygame.mixer.init()
-        self.on_sound = "on.mp3"
-        self.off_sound = "off.mp3"
-        self.on_sound_obj = pygame.mixer.Sound(self.on_sound)
-        self.off_sound_obj = pygame.mixer.Sound(self.off_sound)
-        self.original_app_volumes = {}
-        self.volume_reduction_percent = 70
-        self.FORMAT = pyaudio.paInt16
-        self.CHANNELS = 1
-        self.SEND_SAMPLE_RATE = 16000
-        self.RECEIVE_SAMPLE_RATE = 24000
-        self.CHUNK_SIZE = 1024
-        self.MODEL = "models/gemini-2.0-flash-live-001"
-        self.client = genai.Client(
-            http_options={"api_version": "v1beta"},
-            api_key=os.environ.get("GEMINI_API_KEY"),
-        )
-        self.tools = [
-            types.Tool(code_execution=types.ToolCodeExecution),
-            types.Tool(google_search=types.GoogleSearch()),
-        ]
-        whats_up_command = "Say something short along the lines of 'What's up?' or 'What is it?"
-        self.wake_words = [
-            {"word": "need help", "command": whats_up_command},
-            {"word": "need some help", "command": whats_up_command},
-            {"word": "have a question", "command": whats_up_command},
-            {"word": "quick question", "command": whats_up_command},
-            {"word": "gemini", "command": None},
-            {"word": "jemon", "command": None}
-        ]
+        self.video_mode = False # kinda wasteful
         self.wake_word_enabled = True
-        self.recognizer = sr.Recognizer()
-        self.recognizer.pause_threshold = 0.5
-        self.recognizer.energy_threshold = 1000
-        self.CONFIG = types.LiveConnectConfig(
-            response_modalities=["audio"],
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Puck")
-                )
-            ),
-            system_instruction=types.Content(
-                parts=[
-                    types.Part.from_text(
-                        text="""
+        self.model = "models/gemini-2.0-flash-live-001"
+        self.api_key = os.environ.get("GEMINI_API_KEY")
+        self.volume_reduction_percent = 80
+        self.volume_reduction_blacklist = ["Discord.exe"]
+        self.mic_reduction_percent = 90
+        self.video_history_seconds = 5
+        self.speaking_threshold = 4000
+
+        self.prompt = """
 These instructions are VERY important, follow them carefully.
 Keep your responses short and concise unless necessary or asked to elaborate.
 Like 2 or 3 sentences max.
@@ -95,6 +68,47 @@ Don't ask any questions, unless you absolutely need to ask a clarifying question
 Don't make small talk.
 Commands given to you like this *this is a command* are commands you should follow but never mention them to the user. Treat them like they are invisible, not part of the conversation.
 """
+
+        pygame.mixer.init()
+        self.on_sound_obj = pygame.mixer.Sound("on.mp3")
+        self.off_sound_obj = pygame.mixer.Sound("off.mp3")
+        self.original_app_volumes = {}
+
+        self.recognizer = sr.Recognizer()
+        self.recognizer.pause_threshold = 0.5
+        self.recognizer.energy_threshold = self.speaking_threshold
+
+
+        self.client = genai.Client(
+            http_options={"api_version": "v1beta"},
+            api_key=self.api_key,
+        )
+        self.tools = [
+            types.Tool(code_execution=types.ToolCodeExecution),
+            types.Tool(google_search=types.GoogleSearch()),
+        ]
+
+        whats_up_command = "Say something short along the lines of 'What's up?' or 'What is it?"
+        self.wake_words = [
+            {"word": "need help", "command": whats_up_command},
+            {"word": "need some help", "command": whats_up_command},
+            {"word": "have a question", "command": whats_up_command},
+            {"word": "quick question", "command": whats_up_command},
+            {"word": "gemini", "command": None},
+            {"word": "jemon", "command": None}
+        ]
+
+        self.gen_ai_config = types.LiveConnectConfig(
+            response_modalities=["audio"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Puck")
+                )
+            ),
+            system_instruction=types.Content(
+                parts=[
+                    types.Part.from_text(
+                        text=self.prompt,
                     )
                 ],
                 role="user",
@@ -102,20 +116,22 @@ Commands given to you like this *this is a command* are commands you should foll
             tools=self.tools
         )
         self.pya = pyaudio.PyAudio()
-        self.video_mode = "screen"
         self.audio_in_queue = None
         self.video_queue = None
         self.audio_queue = None
         self.session = None
         self.running = True
         self.audio_stream = None
+        self.audio_out_stream = None
         self.ai_speaking = False
         self.user_speaking = False
         self.deactivate_counter = 0
         self.default_mic_info = None
         self.tasks = []
 
-    def _get_screen(self):
+
+
+    def get_screen_input(self):
         sct = mss.mss()
         monitor = sct.monitors[0]
         i = sct.grab(monitor)
@@ -128,17 +144,21 @@ Commands given to you like this *this is a command* are commands you should foll
         image_bytes = image_io.read()
         return {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}
 
-    async def get_screen(self):
+
+    async def watch_screen(self):
         while self.running:
+            if not self.video_mode:
+                await asyncio.sleep(1)
+                continue
             try:
-                frame = await asyncio.to_thread(self._get_screen)
+                frame = await safe_to_thread(self.get_screen_input)
                 if frame:
                     if self.video_queue.full():
                         await self.video_queue.get()
                     await self.video_queue.put(frame)
                 await asyncio.sleep(1.0)
             except Exception as e:
-                print(f"Error in get_screen: {e}")
+                print(f"Error in watch_screen: {e}")
 
     async def send_video(self):
         while self.running:
@@ -150,6 +170,11 @@ Commands given to you like this *this is a command* are commands you should foll
                     await asyncio.sleep(0.1)
             except Exception as e:
                 print(f"Error in send_video: {e}")
+
+    async def send_all_video(self):
+        while not self.video_queue.empty():
+            msg = await self.video_queue.get()
+            await self.session.send(input=msg)
 
     async def send_audio(self):
         while self.running:
@@ -164,27 +189,32 @@ Commands given to you like this *this is a command* are commands you should foll
 
     async def listen_audio(self):
         kwargs = {"exception_on_overflow": False}
-        self.audio_threshold = 4000
         while self.running:
             try:
-                if self.ai_active:
-                    data = await asyncio.to_thread(self.audio_stream.read, self.CHUNK_SIZE, **kwargs)
+                if self.ai_active and self.audio_stream and self.audio_stream.is_active():
+                    data = await safe_to_thread(self.audio_stream.read, 1024, **kwargs)
                     await self.audio_queue.put({"data": data, "mime_type": "audio/pcm"})
                     audio_data = np.frombuffer(data, dtype=np.int16)
                     volume = np.linalg.norm(audio_data)
-                    self.user_speaking = volume > self.audio_threshold
+                    self.user_speaking = volume > self.speaking_threshold
                 else:
                     await asyncio.sleep(0.1)
             except Exception as e:
-                print(f"Error in listen_audio: {e}")
+                if "Stream closed" in str(e):
+                    await self.activate_mic()
+                else:
+                    print(f"Error in listen_audio: {e}")
 
-    async def adjust_mic_volume(self, volume_percent):
+    async def adjust_mic_volume(self, reduce=True):
         devices = AudioUtilities.GetMicrophone()
         interface = devices.Activate(
             IAudioEndpointVolume._iid_, CLSCTX_ALL, None
         )
         volume = cast(interface, POINTER(IAudioEndpointVolume))
-        volume.SetMasterVolumeLevelScalar(volume_percent / 100.0, None)
+        if reduce:
+            volume.SetMasterVolumeLevelScalar(self.mic_reduction_percent / 100, None)
+        else:
+            volume.SetMasterVolumeLevelScalar(1.0, None)
 
     async def adjust_other_app_volumes(self, reduce=True):
         sessions = AudioUtilities.GetAllSessions()
@@ -193,6 +223,8 @@ Commands given to you like this *this is a command* are commands you should foll
             if session.Process and session.Process.pid != current_process_id:
                 volume = session._ctl.QueryInterface(ISimpleAudioVolume)
                 app_name = session.Process.name() if session.Process else "Unknown"
+                if app_name in self.volume_reduction_blacklist:
+                    continue
                 if reduce:
                     if app_name not in self.original_app_volumes:
                         self.original_app_volumes[app_name] = volume.GetMasterVolume()
@@ -203,14 +235,32 @@ Commands given to you like this *this is a command* are commands you should foll
                         volume.SetMasterVolume(self.original_app_volumes[app_name], None)
 
     async def activity_monitor(self):
+        user_speaking_old = False
+        send_image_cooldown = 3
+        last_user_speaking_time = 0  # Track the last time the user was speaking
         while self.running:
             try:
+                current_time = asyncio.get_event_loop().time()
                 if self.ai_active and not self.ai_speaking and not self.user_speaking:
                     self.deactivate_counter += 1
                     if self.deactivate_counter > 60:
                         await self.deactivate()
                 if self.ai_speaking or self.user_speaking:
                     self.deactivate_counter = 0
+
+                # Check if user changed from not speaking to speaking
+                if not user_speaking_old and self.user_speaking:
+                    if current_time - last_user_speaking_time > send_image_cooldown:
+                        frame = await safe_to_thread(self.get_screen_input)
+                        if frame:
+                            print("Sending image to AI...")
+                            await self.session.send(input=frame)
+
+                # Update the last speaking time if the user is speaking
+                if self.user_speaking:
+                    last_user_speaking_time = current_time
+
+                user_speaking_old = self.user_speaking
                 await asyncio.sleep(0.1)
             except Exception as e:
                 print(f"Error in activity_monitor: {e}")
@@ -225,7 +275,7 @@ Commands given to you like this *this is a command* are commands you should foll
                             break
                         if not self.ai_speaking and (response.data or response.text):
                             self.ai_speaking = True
-                            await self.adjust_mic_volume(10)
+                            await self.adjust_mic_volume(reduce=True)
                         if data := response.data:
                             self.audio_in_queue.put_nowait(data)
                             continue
@@ -235,71 +285,104 @@ Commands given to you like this *this is a command* are commands you should foll
                         self.audio_in_queue.get_nowait()
                     if self.ai_speaking:
                         self.ai_speaking = False
-                        await self.adjust_mic_volume(100)
+                        await self.adjust_mic_volume(reduce=False)
                 await asyncio.sleep(0.1)
             except Exception as e:
                 print(f"Error in receive_audio: {e}")
 
-    async def play_audio(self):
-        stream = await asyncio.to_thread(
+    async def activate_speaker(self):
+        if self.audio_out_stream:
+            await self.deactivate_speaker()
+        self.audio_out_stream = await safe_to_thread(
             self.pya.open,
-            format=self.FORMAT,
-            channels=self.CHANNELS,
-            rate=self.RECEIVE_SAMPLE_RATE,
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=24000,
             output=True,
         )
+
+    async def deactivate_speaker(self):
+        if self.audio_out_stream:
+            await safe_to_thread(self.audio_out_stream.stop_stream)
+            await safe_to_thread(self.audio_out_stream.close)
+            self.audio_out_stream = None
+
+    async def play_audio(self):
         while self.running:
             try:
-                if self.ai_active and not self.audio_in_queue.empty():
+                if self.ai_active and self.audio_out_stream and not self.audio_in_queue.empty():
                     bytestream = await self.audio_in_queue.get()
-                    await asyncio.to_thread(stream.write, bytestream)
+                    if self.audio_out_stream and self.audio_out_stream.is_active():
+                        await safe_to_thread(self.audio_out_stream.write, bytestream)
                 else:
                     await asyncio.sleep(0.1)
             except Exception as e:
-                print(f"Error in play_audio: {e}")
+                if "Stream closed" in str(e) or "Unanticipated host error" in str(e) or "Stream not open" in str(e):
+                    await self.activate_speaker()
+                else:
+                    print(f"Error in play_audio: {e}")
+
+
+    async def empty_audio_queue(self):
+        while not self.audio_queue.empty():
+            self.audio_queue.get_nowait()
+    
+    async def empty_audio_in_queue(self):
+        while not self.audio_in_queue.empty():
+            self.audio_in_queue.get_nowait()
+
+
+    async def activate_mic(self):
+        if self.audio_stream:
+            await self.deactivate_mic()
+        self.default_mic_info = await safe_to_thread(self.pya.get_default_input_device_info)
+        self.audio_stream = await safe_to_thread(
+            self.pya.open,
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=16000,
+            input=True,
+            input_device_index=self.default_mic_info["index"],
+            frames_per_buffer=1024,
+        )
+
+    async def deactivate_mic(self):
+        if self.audio_stream:
+            await safe_to_thread(self.audio_stream.stop_stream)
+            await safe_to_thread(self.audio_stream.close)
+            self.audio_stream = None
+
 
     async def deactivate(self):
         self.ai_active = False
         await self.adjust_other_app_volumes(reduce=False)
-        if self.ai_speaking:
-            self.ai_speaking = False
-            await self.adjust_mic_volume(100)
-        if self.audio_stream:
-            await asyncio.to_thread(self.audio_stream.stop_stream)
-            await asyncio.to_thread(self.audio_stream.close)
-            self.audio_stream = None
+        await self.adjust_mic_volume(reduce=False)
+        await self.deactivate_mic()
+        await self.deactivate_speaker()
         if self.off_sound_obj:
-            await asyncio.to_thread(self.off_sound_obj.play)
+            await safe_to_thread(self.off_sound_obj.play)
         print("AI deactivated.")
 
+
+    
     async def activate(self):
-        self.default_mic_info = await asyncio.to_thread(self.pya.get_default_input_device_info)
-        self.audio_stream = await asyncio.to_thread(
-            self.pya.open,
-            format=self.FORMAT,
-            channels=self.CHANNELS,
-            rate=self.SEND_SAMPLE_RATE,
-            input=True,
-            input_device_index=self.default_mic_info["index"],
-            frames_per_buffer=self.CHUNK_SIZE,
-        )
-        self.ai_active = True
         self.deactivate_counter = 0
         self.user_speaking = False
         self.ai_speaking = False
-        while not self.audio_in_queue.empty():
-            self.audio_in_queue.get_nowait()
-        while not self.audio_queue.empty():
-            self.audio_queue.get_nowait()
-        if self.on_sound_obj:
-            await asyncio.to_thread(self.on_sound_obj.play)
+        await self.empty_audio_queue()
+        await self.empty_audio_in_queue()
+        await self.send_all_video()
+        await safe_to_thread(self.on_sound_obj.play)
         await self.adjust_other_app_volumes(reduce=True)
+        await self.activate_mic()
+        await self.activate_speaker()
+        self.ai_active = True
         print("AI activated.")
 
     async def toggle_handler(self):
         while self.running:
             try:
-                await asyncio.to_thread(self.toggle_event.wait)
+                await safe_to_thread(self.toggle_event.wait)
                 if self.ai_active:
                     await self.deactivate()
                 else:
@@ -318,7 +401,9 @@ Commands given to you like this *this is a command* are commands you should foll
         try:
             with sr.Microphone() as source:
                 self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                audio = self.recognizer.listen(source, phrase_time_limit=3)
+                audio = self.recognizer.listen(source, phrase_time_limit=3, timeout=1)
+            if not self.running or self.ai_active:
+                return False
             text = self.recognizer.recognize_google(audio).lower()
             print(f"Recognized speech: {text}")
             for wake_word in self.wake_words:
@@ -328,11 +413,6 @@ Commands given to you like this *this is a command* are commands you should foll
                     return wake_word
         except sr.WaitTimeoutError:
             return False
-        except sr.RequestError as e:
-            print(f"Could not request results from Google Speech Recognition service; {e}")
-            return False
-        except sr.UnknownValueError:
-            return False
         except Exception as e:
             if self.running:
                 print(f"Error in _recognize_wake_word: {e}")
@@ -341,22 +421,17 @@ Commands given to you like this *this is a command* are commands you should foll
     async def listen_for_wake_word(self):
         while self.running:
             try:
-                if not self.running:
-                    break
                 if not self.ai_active and self.wake_word_enabled:
-                    wake_word = await asyncio.to_thread(self._recognize_wake_word)
-                    if not self.running:
-                        break
+                    wake_word = await safe_to_thread(self._recognize_wake_word)
                     if wake_word:
                         await self.activate()
                         if wake_word["command"]:
                             await asyncio.sleep(0.2)
                             await self.session.send(input=f"*{wake_word['command']}*", end_of_turn=True)
-                await asyncio.sleep(0.1)
             except Exception as e:
                 if self.running:
                     print(f"Error in listen_for_wake_word: {e}")
-                await asyncio.sleep(0.1)
+            await asyncio.sleep(0.1)
 
     async def cleanup(self):
         print(f"Cancelling {len(self.tasks)} tasks...")
@@ -377,7 +452,7 @@ Commands given to you like this *this is a command* are commands you should foll
 
         print("Unhooking keyboard...")
         try:
-            await asyncio.to_thread(keyboard.unhook_all)
+            await safe_to_thread(keyboard.unhook_all)
             print("Keyboard listener unhooked.")
         except Exception as e:
             print(f"Error unhooking keyboard: {e}")
@@ -385,14 +460,14 @@ Commands given to you like this *this is a command* are commands you should foll
         print("Terminating PyAudio...")
         if self.pya:
             try:
-                await asyncio.to_thread(self.pya.terminate)
+                await safe_to_thread(self.pya.terminate)
                 print("PyAudio terminated.")
             except Exception as e:
                 print(f"Error terminating PyAudio: {e}")
 
         print("Quitting Pygame Mixer...")
         try:
-            await asyncio.to_thread(pygame.mixer.quit)
+            await safe_to_thread(pygame.mixer.quit)
             print("Pygame Mixer quit.")
         except Exception as e:
             print(f"Error quitting Pygame Mixer: {e}")
@@ -404,27 +479,27 @@ Commands given to you like this *this is a command* are commands you should foll
     async def run(self):
         self.tasks = []
         while self.running:
-            await asyncio.to_thread(self.setup_hotkey)
+            await safe_to_thread(self.setup_hotkey)
             try:
                 async with (
-                    self.client.aio.live.connect(model=self.MODEL, config=self.CONFIG) as session,
+                    self.client.aio.live.connect(model=self.model, config=self.gen_ai_config) as session,
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session = session
                     self.audio_in_queue = asyncio.Queue()
-                    self.video_queue = asyncio.Queue(maxsize=15)
+                    self.video_queue = asyncio.Queue(maxsize=self.video_history_seconds)
                     self.audio_queue = asyncio.Queue(maxsize=5)
 
                     self.tasks.append(tg.create_task(self.toggle_handler()))
                     self.tasks.append(tg.create_task(self.send_video()))
                     self.tasks.append(tg.create_task(self.send_audio()))
                     self.tasks.append(tg.create_task(self.listen_audio()))
-                    self.tasks.append(tg.create_task(self.get_screen()))
+                    self.tasks.append(tg.create_task(self.watch_screen()))
                     self.tasks.append(tg.create_task(self.receive_audio()))
                     self.tasks.append(tg.create_task(self.play_audio()))
                     self.tasks.append(tg.create_task(self.activity_monitor()))
                     self.tasks.append(tg.create_task(self.listen_for_wake_word()))
-
+                    print("AI is running. Press Alt+Q to toggle.")
             except asyncio.CancelledError:
                 print("Main run task cancelled (likely during shutdown).")
                 self.running = False
