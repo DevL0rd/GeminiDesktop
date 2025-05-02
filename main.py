@@ -71,7 +71,7 @@ class AI:
         ]
 
         # Wake word settings
-        self.wake_word = "hey gemini"
+        self.wake_word = "gemini"
         self.wake_word_enabled = True
         self.recognizer = sr.Recognizer()
         self.recognizer.pause_threshold = 0.5  # Time of silence needed to consider the phrase complete
@@ -267,7 +267,7 @@ Don't ask many questions, and don't make small talk. Just respond unless you abs
                         # AI has started speaking
                         if not self.ai_speaking and (response.data or response.text):
                             self.ai_speaking = True
-                            await self.adjust_mic_volume(30)  # Lower mic volume when AI speaks
+                            await self.adjust_mic_volume(10)  # Lower mic volume when AI speaks
                             
                         if data := response.data:
                             self.audio_in_queue.put_nowait(data)
