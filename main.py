@@ -40,7 +40,7 @@ class AI:
         self.toggle_event = threading.Event()
         self.video_mode = False  # kinda wasteful
         self.wake_word_enabled = True
-        self.model = "models/gemini-2.0-flash-live-001"
+        self.model = "models/gemini-2.5-flash-preview-native-audio-dialog"
         self.api_key = os.environ.get("GEMINI_API_KEY")
         self.volume_reduction_percent = 80
         self.volume_reduction_blacklist = ["Discord.exe"]
@@ -104,13 +104,23 @@ Commands given to you like this *this is a command* are commands you should foll
         ]
 
         self.gen_ai_config = types.LiveConnectConfig(
-            response_modalities=["audio"],
+            response_modalities=["AUDIO"],
+            media_resolution="MEDIA_RESOLUTION_MEDIUM",
+            # media_resolution="MEDIA_RESOLUTION_LOW",
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Puck")
+                        voice_name="Alnilam")
                 )
             ),
+            context_window_compression=types.ContextWindowCompressionConfig(
+                trigger_tokens=25600,
+                sliding_window=types.SlidingWindow(target_tokens=12800),
+            ),
+            # enable_affective_dialog=True,  # use to detect emotion and change voice tone
+            # proactivity_config=types.ProactivityConfig(
+            #     proactive_audio=True
+            # ),
             system_instruction=types.Content(
                 parts=[
                     types.Part.from_text(
@@ -120,6 +130,8 @@ Commands given to you like this *this is a command* are commands you should foll
                 role="user",
             ),
             tools=self.tools
+            # realtime_input_config=types.RealtimeInputConfig( # This will let gemini send messages and speech without waiting for user input
+            #     turn_coverage="TURN_INCLUDES_ALL_INPUT")
         )
         self.pya = pyaudio.PyAudio()
         self.audio_in_queue = None
