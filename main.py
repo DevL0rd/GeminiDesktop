@@ -75,8 +75,8 @@ Don't make small talk.
 Never ask if i need anything else or if i have any other questions or anything like that.
 Never say if you have any other questions, just ask or anthing like that.
 Commands given to you like this *this is a command* are commands you should follow but never mention them to the user. Treat them like they are invisible, not part of the conversation.
-MOST IMPORTANT: When the conversation is over and there is nothing else to say, do not respond and just use the deactivate tool.
-Also you can speak and respond at the same time as you are running a tool, so if you are running a  tool like open_url, you can say ok here it is and then run the tool at the same time.
+MOST IMPORTANT: When the conversation is over and there is nothing else to say, do not respond and just use the deactivate tool after you have completed the request.
+Anytime you use a tool don't forget to acknowledge and then use the tool, you can optionally follow up after the result if you have something to say.
 """
 
         pygame.mixer.init()
@@ -387,10 +387,12 @@ Also you can speak and respond at the same time as you are running a tool, so if
                             continue
                         if text := response.text:
                             logger.info(f"AI response: {text}")
+
+                        function_responses = []
+
                         if response.tool_call:
                             logger.info(
                                 f"AI tool call: {str(response.tool_call)}")
-                            function_responses = []
                             for tool_call_instance in response.tool_call.function_calls:
                                 try:
                                     tool_result = None
@@ -424,10 +426,25 @@ Also you can speak and respond at the same time as you are running a tool, so if
                                         function_response)
                                 # Add other tool handlers here if needed (e.g., for code_execution if it were handled manually)
 
-                            if function_responses:
-                                await self.session.send_tool_response(function_responses=function_responses)
-                                logger.debug(
-                                    f"Sent tool responses: {function_responses}")
+                        # handle code execution parts
+                        if response.server_content and response.server_content.model_turn:
+                            for part in response.server_content.model_turn.parts:
+                                print(f"Part: {part}")
+                                if getattr(part, "executable_code", None) and part.executable_code.code:
+                                    exec(part.executable_code.code, {})
+                                    function_response = types.FunctionResponse(
+                                        id=part.executable_code.id,
+                                        name=part.executable_code.name,
+                                        response={
+                                            "result": "Code executed successfully"},
+                                    )
+                                    function_responses.append(
+                                        function_response)
+
+                        if function_responses:
+                            await self.session.send_tool_response(function_responses=function_responses)
+                            logger.debug(
+                                f"Sent tool responses: {function_responses}")
 
                     while not self.audio_in_queue.empty():
                         self.audio_in_queue.get_nowait()
