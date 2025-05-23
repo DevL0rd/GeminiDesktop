@@ -42,21 +42,44 @@ client = genai.Client(
     api_key=os.environ.get("GEMINI_API_KEY"),
 )
 
+tools = [
+    types.Tool(
+        function_declarations=[
+            types.FunctionDeclaration(
+                name="getWeather",
+                description="gets the weather for a requested city",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    properties={
+                        "city": genai.types.Schema(
+                            type=genai.types.Type.STRING,
+                        ),
+                    },
+                ),
+            ),
+        ]
+    ),
+]
 
 CONFIG = types.LiveConnectConfig(
     response_modalities=[
         "AUDIO",
     ],
-    media_resolution="MEDIA_RESOLUTION_LOW",
+    media_resolution="MEDIA_RESOLUTION_MEDIUM",
     speech_config=types.SpeechConfig(
         voice_config=types.VoiceConfig(
             prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                voice_name="Alnilam")
+                voice_name="Zephyr")
         )
     ),
     context_window_compression=types.ContextWindowCompressionConfig(
         trigger_tokens=25600,
         sliding_window=types.SlidingWindow(target_tokens=12800),
+    ),
+    tools=tools,
+    system_instruction=types.Content(
+        parts=[types.Part.from_text(text="test prompt")],
+        role="user"
     ),
 )
 

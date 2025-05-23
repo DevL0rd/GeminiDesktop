@@ -1,3 +1,5 @@
+import json
+import webbrowser
 import os
 import asyncio
 import base64
@@ -73,6 +75,8 @@ Don't make small talk.
 Never ask if i need anything else or if i have any other questions or anything like that.
 Never say if you have any other questions, just ask or anthing like that.
 Commands given to you like this *this is a command* are commands you should follow but never mention them to the user. Treat them like they are invisible, not part of the conversation.
+MOST IMPORTANT: When the conversation is over and there is nothing else to say, do not respond and just use the deactivate tool.
+Also you can speak and respond at the same time as you are running a tool, so if you are running a  tool like open_url, you can say ok here it is and then run the tool at the same time.
 """
 
         pygame.mixer.init()
@@ -89,8 +93,39 @@ Commands given to you like this *this is a command* are commands you should foll
             api_key=self.api_key,
         )
         self.tools = [
-            types.Tool(code_execution=types.ToolCodeExecution),
+            types.Tool(code_execution=types.ToolCodeExecution()),
             types.Tool(google_search=types.GoogleSearch()),
+            types.Tool(
+                function_declarations=[
+                    types.FunctionDeclaration(
+                        name=self.deactivate.__name__,
+                        description=self.deactivate.__doc__,
+                        parameters=types.Schema(
+                            type=types.Type.OBJECT,
+                            properties={},
+                            required=[]
+                        )
+                    )
+                ]
+            ),
+            types.Tool(
+                function_declarations=[
+                    types.FunctionDeclaration(
+                        name="open_url",
+                        description="Open a URL in the default browser",
+                        parameters=types.Schema(
+                            type=types.Type.OBJECT,
+                            properties={
+                                "url": types.Schema(
+                                    type=types.Type.STRING,
+                                    description="The URL to open."
+                                )
+                            },
+                            required=["url"]
+                        )
+                    )
+                ]
+            )
         ]
 
         whats_up_command = "Say something short along the lines of 'What's up?' or 'What is it?"
@@ -335,8 +370,8 @@ Commands given to you like this *this is a command* are commands you should foll
                 logger.error(f"Error in activity_monitor: {e}")
             await asyncio.sleep(0.1)
 
-    async def receive_audio(self):
-        logger.debug("Starting audio receiver")
+    async def receive(self):
+        logger.debug("Starting receiver")
         while True:
             try:
                 if self.ai_active:
@@ -352,13 +387,55 @@ Commands given to you like this *this is a command* are commands you should foll
                             continue
                         if text := response.text:
                             logger.info(f"AI response: {text}")
+                        if response.tool_call:
+                            logger.info(
+                                f"AI tool call: {str(response.tool_call)}")
+                            function_responses = []
+                            for tool_call_instance in response.tool_call.function_calls:
+                                try:
+                                    tool_result = None
+                                    if tool_call_instance.name == self.deactivate.__name__:
+                                        # Execute the tool
+                                        tool_result = await self.deactivate()
+                                    elif tool_call_instance.name == "open_url":
+                                        url = tool_call_instance.args["url"]
+                                        webbrowser.open(url)
+
+                                    if tool_result is None:
+                                        tool_result = {
+                                            "result": "Tool executed successfully"}
+                                    function_response = types.FunctionResponse(
+                                        id=tool_call_instance.id,
+                                        name=tool_call_instance.name,
+                                        # response={"result": "URL opened"}
+                                        response=tool_result,
+                                    )
+                                    function_responses.append(
+                                        function_response)
+                                except Exception as e:
+                                    logger.error(
+                                        f"Error executing tool {tool_call_instance.name}: {e}")
+                                    function_response = types.FunctionResponse(
+                                        id=tool_call_instance.id,
+                                        name=tool_call_instance.name,
+                                        response={"error": str(e)},
+                                    )
+                                    function_responses.append(
+                                        function_response)
+                                # Add other tool handlers here if needed (e.g., for code_execution if it were handled manually)
+
+                            if function_responses:
+                                await self.session.send_tool_response(function_responses=function_responses)
+                                logger.debug(
+                                    f"Sent tool responses: {function_responses}")
+
                     while not self.audio_in_queue.empty():
                         self.audio_in_queue.get_nowait()
                     if self.ai_speaking:
                         self.ai_speaking = False
                         await self.adjust_mic_volume(reduce=False)
             except Exception as e:
-                logger.error(f"Error in receive_audio: {e}")
+                logger.error(f"Error in receive: {e}")
             await asyncio.sleep(0.1)
 
     async def activate_speaker(self):
@@ -437,6 +514,7 @@ Commands given to you like this *this is a command* are commands you should foll
         logger.debug("Microphone deactivated")
 
     async def deactivate(self):
+        """Deactivates the AI and waits for the user to reactivate it."""
         logger.debug("Deactivating AI")
         self.ai_active = False
         await self.adjust_other_app_volumes(reduce=False)
@@ -587,7 +665,7 @@ Commands given to you like this *this is a command* are commands you should foll
                     self.tasks.append(tg.create_task(self.send_audio()))
                     self.tasks.append(tg.create_task(self.listen_audio()))
                     self.tasks.append(tg.create_task(self.watch_screen()))
-                    self.tasks.append(tg.create_task(self.receive_audio()))
+                    self.tasks.append(tg.create_task(self.receive()))
                     self.tasks.append(tg.create_task(self.play_audio()))
                     self.tasks.append(tg.create_task(self.activity_monitor()))
                     self.tasks.append(tg.create_task(
