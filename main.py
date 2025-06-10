@@ -1,4 +1,5 @@
 import json
+import traceback
 import webbrowser
 import os
 import asyncio
@@ -453,6 +454,7 @@ Anytime you use a tool don't forget to acknowledge and then use the tool, you ca
                         await self.adjust_mic_volume(reduce=False)
             except Exception as e:
                 logger.error(f"Error in receive: {e}")
+                traceback.print_exc()
             await asyncio.sleep(0.1)
 
     async def activate_speaker(self):
