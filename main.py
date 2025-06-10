@@ -432,16 +432,27 @@ Anytime you use a tool don't forget to acknowledge and then use the tool, you ca
                             for part in response.server_content.model_turn.parts:
                                 print(f"Part: {part}")
                                 if getattr(part, "executable_code", None) and part.executable_code.code:
-                                    exec(part.executable_code.code, {})
-                                    function_response = types.FunctionResponse(
-                                        id=part.executable_code.id,
-                                        name=part.executable_code.name,
-                                        response={
-                                            "result": "Code executed successfully"},
-                                    )
-                                    function_responses.append(
-                                        function_response)
-
+                                    try:
+                                        exec(part.executable_code.code, {})
+                                        function_response = types.FunctionResponse(
+                                            id=part.executable_code.id,
+                                            name=part.executable_code.name,
+                                            response={
+                                                "result": "Code executed successfully"},
+                                        )
+                                        function_responses.append(
+                                            function_response)
+                                    except Exception as e:
+                                        logger.error(
+                                            f"Error executing code: {e}")
+                                        function_response = types.FunctionResponse(
+                                            id=part.executable_code.id,
+                                            name=part.executable_code.name,
+                                            response={
+                                                "error": f"Error executing code: {e} Perhaps you meant to call a tool?"},
+                                        )
+                                        function_responses.append(
+                                            function_response)
                         if function_responses:
                             await self.session.send_tool_response(function_responses=function_responses)
                             logger.debug(
